@@ -71,9 +71,9 @@ final class KafkaConsumerSpec extends BaseKafkaSpec {
         val produced = (0 until 5).map(n => s"key-$n" -> s"value->$n")
         publishToKafka(topic, produced)
 
-        def consumed(id: Int) =
+        def consumed(id: Int, groupId: String) =
           KafkaConsumer
-            .stream(consumerSettings[IO].withGroupId("test"))
+            .stream(consumerSettings[IO].withGroupId(groupId))
             .subscribeTo(topic)
             .evalMap(IO.sleep(3.seconds).as(_)) // sleep a bit to trigger potential race condition with _.stream
             .records
@@ -88,8 +88,8 @@ final class KafkaConsumerSpec extends BaseKafkaSpec {
 
           val res = fs2
             .Stream(
-              consumed(1),
-              consumed(2)
+              consumed(1, s"several-consumers-$i"),
+              consumed(2, s"several-consumers-$i")
             )
             .parJoinUnbounded
             .compile
