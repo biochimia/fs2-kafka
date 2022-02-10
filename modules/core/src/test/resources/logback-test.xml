@@ -11,6 +11,8 @@
   <logger name="org.apache.kafka.clients.producer.ProducerConfig" level="WARN" />
   <logger name="org.apache.kafka.clients.admin.AdminClientConfig" level="WARN" />
 
+  <logger name="fs2.kafka.KafkaConsumer" level="DEBUG" />
+
   <root level="INFO" additivity="false">
     <appender-ref ref="STDOUT"/>
   </root>
