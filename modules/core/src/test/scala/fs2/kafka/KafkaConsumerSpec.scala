@@ -13,6 +13,7 @@ import org.apache.kafka.clients.consumer.NoOffsetForPartitionException
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.errors.TimeoutException
 import org.scalatest.Assertion
+import org.slf4j.LoggerFactory
 
 import scala.collection.immutable.SortedSet
 import scala.concurrent.duration._
@@ -22,6 +23,8 @@ final class KafkaConsumerSpec extends BaseKafkaSpec {
   type Consumer = KafkaConsumer[IO, String, String]
 
   type ConsumerStream = Stream[IO, CommittableConsumerRecord[IO, String, String]]
+
+  val logger = LoggerFactory.getLogger(getClass())
 
   describe("creating consumers") {
     ignore("should support defined syntax") {
@@ -68,20 +71,25 @@ final class KafkaConsumerSpec extends BaseKafkaSpec {
         val produced = (0 until 5).map(n => s"key-$n" -> s"value->$n")
         publishToKafka(topic, produced)
 
-        val consumed =
+        def consumed(id: Int) =
           KafkaConsumer
             .stream(consumerSettings[IO].withGroupId("test"))
             .subscribeTo(topic)
             .evalMap(IO.sleep(3.seconds).as(_)) // sleep a bit to trigger potential race condition with _.stream
             .records
             .map(committable => committable.record.key -> committable.record.value)
+            .evalTap { pair =>
+              IO.delay(logger.info(s"Consumer #$id: $pair"))
+            }
             .interruptAfter(10.seconds) // wait some time to catch potentially duplicated records
 
-        (0 until 100).foreach { _ =>
+        (0 until 100).foreach { i =>
+          logger.info(s"Test iteration #$i")
+
           val res = fs2
             .Stream(
-              consumed,
-              consumed
+              consumed(1),
+              consumed(2)
             )
             .parJoinUnbounded
             .compile
