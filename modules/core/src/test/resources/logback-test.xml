@@ -6,7 +6,12 @@
     </encoder>
   </appender>
 
-  <root level="ERROR" additivity="false">
+  <logger name="io.confluent.kafka.serializers.KafkaAvroSerializerConfig" level="WARN" />
+  <logger name="org.apache.kafka.clients.consumer.ConsumerConfig" level="WARN" />
+  <logger name="org.apache.kafka.clients.producer.ProducerConfig" level="WARN" />
+  <logger name="org.apache.kafka.clients.admin.AdminClientConfig" level="WARN" />
+
+  <root level="INFO" additivity="false">
     <appender-ref ref="STDOUT"/>
   </root>
 </configuration>

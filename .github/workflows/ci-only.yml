@@ -27,4 +27,4 @@ jobs:
         with:
           java-version: ${{ matrix.java }}
 
-      - run: sbt ++${{ matrix.scala }} ci
+      - run: sbt ++${{ matrix.scala }} 'test:testOnly *KafkaConsumerSpec'
