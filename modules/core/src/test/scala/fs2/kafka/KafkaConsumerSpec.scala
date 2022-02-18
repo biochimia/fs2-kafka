@@ -3,7 +3,7 @@ package fs2.kafka
 import cats.data.NonEmptySet
 import cats.effect.Ref
 import cats.effect.{Fiber, IO}
-import cats.effect.std.Queue
+import cats.effect.std.{CountDownLatch, Queue}
 import cats.syntax.all._
 import cats.effect.unsafe.implicits.global
 import fs2.Stream
@@ -71,11 +71,16 @@ final class KafkaConsumerSpec extends BaseKafkaSpec {
         val produced = (0 until 5).map(n => s"key-$n" -> s"value->$n")
         publishToKafka(topic, produced)
 
-        def consumed(id: Int, groupId: String) =
+        def consumed(id: Int, effect: IO[Unit]) =
           KafkaConsumer
-            .stream(consumerSettings[IO].withGroupId(groupId))
+            .stream(consumerSettings[IO].withGroupId("test"))
             .subscribeTo(topic)
-            .evalMap(IO.sleep(3.seconds).as(_)) // sleep a bit to trigger potential race condition with _.stream
+            .evalTap { _ =>
+              for {
+                _ <- IO.sleep(3.seconds) // sleep a bit to trigger potential race condition with _.stream
+                _ <- effect
+              } yield ()
+            }
             .records
             .map(committable => committable.record.key -> committable.record.value)
             .evalTap { pair =>
@@ -86,15 +91,19 @@ final class KafkaConsumerSpec extends BaseKafkaSpec {
         (0 until 100).foreach { i =>
           logger.info(s"Test iteration #$i")
 
-          val res = fs2
-            .Stream(
-              consumed(1, s"several-consumers-$i"),
-              consumed(2, s"several-consumers-$i")
-            )
-            .parJoinUnbounded
-            .compile
-            .toVector
-            .unsafeRunSync()
+          val res =
+            (for {
+              latch <- Stream.eval(CountDownLatch[IO](1))
+              record <-
+                Stream(
+                  consumed(1, latch.await),
+                  consumed(2, latch.release)
+                )
+                .parJoinUnbounded
+            } yield record)
+              .compile
+              .toVector
+              .unsafeRunSync()
 
           res should contain theSameElementsAs produced
         }
