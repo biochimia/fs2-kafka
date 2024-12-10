@@ -103,6 +103,10 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
     commit.attempt >>= request.callback
   }
 
+  // FIXME: The naming of this method does not reflect what it does, which is
+  // simply an Async[F].async with a timeout. Although the method is used to
+  // commit offsets, it takes no explicit part in that mechanism and is only
+  // supporting code/syntax.
   private[this] def runCommitAsync(
     offsets: Map[TopicPartition, OffsetAndMetadata]
   )(
@@ -131,6 +135,11 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
     // We need to start this action in a separate fiber without waiting for the result,
     // because commitAsync could be resolved only with the poll consumer call.
     // Which could be done only when the current request is processed.
+    // FIXME: This could be avoided by moving the `runCommitAsync` invocation
+    // up the chain and outside queueing of the `Request.ManualCommitAsync`.
+    // This is a difference with the "regular" commit implemented by
+    // `CommittableConsumerRecord`, which requires less poll cycles to
+    // complete.
     res.start.void
   }
 

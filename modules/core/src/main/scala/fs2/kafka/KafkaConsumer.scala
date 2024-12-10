@@ -90,6 +90,13 @@ object KafkaConsumer {
   )(implicit
     F: Async[F]
   ): F[Unit] =
+    // FIXME: Cancellation could imply a request is never handled, and thus
+    // never completes; Potentially this could be addressed by having a way to
+    // surface cancellation back to the requester. While we're at it, what
+    // happens with errors, it would seem they break the loop.
+    // FIXME: This whole loop should run in the consumer's blocking thread. As
+    // it stands it's constantly shoving work around across contexts.
+    // FIXME: We don't need a queue, we should just schedule requests on the Blocking context.
     OptionT(requests.tryTake).getOrElseF(polls.take.widen).flatMap(actor.handle).foreverM[Unit]
 
   /**
@@ -105,6 +112,11 @@ object KafkaConsumer {
   )(implicit
     F: Temporal[F]
   ): F[Unit] =
+    // FIXME: This could use a shared tick stream, instead of another sleep.
+    // FIXME: The choice of Queue.bounded(1) over Queue.synchronous means that
+    // pollInterval does not take into account time spent in processing of poll
+    // and other requests
+    // FIXME: This should be ScheduledExecutorService.scheduleAtFixedRate
     polls.offer(Request.poll).andWait(pollInterval).foreverM[Unit]
 
   private def startBackgroundConsumer[F[_], K, V](
@@ -116,6 +128,8 @@ object KafkaConsumer {
     F: Async[F]
   ): Resource[F, Fiber[F, Throwable, Unit]] =
     Resource.make {
+      // FIXME: Race could error/finish silently. Errors in the fiber are never
+      // surfaced.
       F.race(
           runConsumerActor(requests, polls, actor),
           runPollScheduler(polls, pollInterval)

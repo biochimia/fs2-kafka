@@ -22,6 +22,9 @@ private[kafka] object WithConsumer {
     mk: MkConsumer,
     settings: ConsumerSettings[F, K, V]
   ): Resource[F, WithConsumer[F]] = {
+    // FIXME: Instead of sticking to one thread per consumer, it could make
+    // sense to share "blocking" threads across multiple Kafka consumers. It
+    // might reduce the number of threads in a setup with multiple consumers.
     val blocking: Resource[F, Blocking[F]] = settings.customBlockingContext match {
       case None     => Blocking.singleThreaded[F]("fs2-kafka-consumer")
       case Some(ec) => Resource.pure(Blocking.fromExecutionContext(ec))
