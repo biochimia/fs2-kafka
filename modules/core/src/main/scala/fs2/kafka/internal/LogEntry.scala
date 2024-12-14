@@ -10,7 +10,7 @@ import java.util.regex.Pattern
 
 import scala.collection.immutable.SortedSet
 
-import cats.data.{Chain, NonEmptyList, NonEmptySet, NonEmptyVector}
+import cats.data.{NonEmptyList, NonEmptySet, NonEmptyVector}
 import cats.syntax.all.*
 import fs2.kafka.instances.*
 import fs2.kafka.internal.syntax.*
@@ -211,15 +211,11 @@ private[kafka] object LogEntry {
 
   }
 
-  final case class CommittedPendingCommits[F[_]](
-    pendingCommits: Chain[Request.Commit[F]],
-    state: State[F, ?, ?]
-  ) extends LogEntry {
+  final case class CommittedPendingCommit[F[_]](pendingCommit: Request.Commit[F]) extends LogEntry {
 
     override def level: LogLevel = Debug
 
-    override def message: String =
-      s"Committed pending commits [$pendingCommits]. Current state [$state]."
+    override def message: String = s"Committed pending commit [$pendingCommit]."
 
   }
 
