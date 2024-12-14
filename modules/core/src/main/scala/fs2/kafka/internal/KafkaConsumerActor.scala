@@ -91,7 +91,7 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
   private[this] def commit(request: Request.Commit[F]): F[Unit] =
     ref.flatModify { state =>
       val commitF = commitAsync(request.offsets, request.callback)
-      if (state.rebalancing) {
+      if (state.rebalancing || state.pendingCommits.nonEmpty) {
         val newState = state.withPendingCommit(
           commitF >> logging.log(CommittedPendingCommit(request))
         )
@@ -292,7 +292,7 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
         }
         .flatMap(records)
 
-    def handlePoll(newRecords: ConsumerRecords, initialRebalancing: Boolean): F[Unit] = {
+    def handlePoll(newRecords: ConsumerRecords): F[Unit] = {
       def handleBatch(
         state: State[F, K, V],
         pendingCommits: Option[HandlePollResult.PendingCommits]
@@ -371,9 +371,7 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
         }
 
       def handlePendingCommits(state: State[F, K, V]) = {
-        val currentRebalancing = state.rebalancing
-
-        if (initialRebalancing && !currentRebalancing && state.pendingCommits.nonEmpty) {
+        if (!state.rebalancing && state.pendingCommits.nonEmpty) {
           val newState = state.withoutPendingCommits
           (
             newState,
@@ -407,10 +405,9 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
       .get
       .flatMap { state =>
         F.uncancelable { poll =>
-            val initialRebalancing = state.rebalancing
             for {
               records <- poll(pollConsumer(state))
-              _       <- handlePoll(records, initialRebalancing)
+              _       <- handlePoll(records)
             } yield ()
           }
           .whenA(state.subscribed && state.streaming)
