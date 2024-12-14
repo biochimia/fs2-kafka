@@ -91,17 +91,16 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
       .handleErrorWith(e => F.delay(callback(Left(e))))
 
   private[this] def commit(request: Request.Commit[F]): F[Unit] =
-    ref
-      .modify { state =>
-        if (state.rebalancing) {
-          val newState = state.withPendingCommit(request)
-          (newState, Some(StoredPendingCommit(request, newState)))
-        } else (state, None)
-      }
-      .flatMap {
-        case Some(log) => logging.log(log)
-        case None      => commitAsync(request.offsets, request.callback)
-      }
+    ref.flatModify { state =>
+      val commitF = commitAsync(request.offsets, request.callback)
+      if (state.rebalancing) {
+        val newState = state.withPendingCommit(
+          commitF >> logging.log(CommittedPendingCommit(request))
+        )
+        (newState, logging.log(StoredPendingCommit(request, newState)))
+      } else
+        (state, commitF)
+    }
 
   private[this] def manualCommitSync(request: Request.ManualCommitSync[F]): F[Unit] = {
     val commit =
@@ -388,10 +387,7 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
           (
             newState,
             Some(
-              HandlePollResult.PendingCommits(
-                commits = state.pendingCommits,
-                log = CommittedPendingCommits(state.pendingCommits, newState)
-              )
+              HandlePollResult.PendingCommits(commits = state.pendingCommits)
             )
           )
         } else (state, None)
@@ -448,15 +444,9 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
 
   private[this] object HandlePollResult {
 
-    case class PendingCommits(
-      commits: Chain[Request.Commit[F]],
-      log: CommittedPendingCommits[F]
-    ) {
+    case class PendingCommits(commits: Chain[F[Unit]]) {
 
-      def commit: F[Unit] =
-        commits.traverse { commitRequest =>
-          commitAsync(commitRequest.offsets, commitRequest.callback)
-        } >> logging.log(log)
+      def commit: F[Unit] = commits.sequence_
 
     }
 
@@ -506,7 +496,7 @@ private[kafka] object KafkaConsumerActor {
   final case class State[F[_], K, V](
     fetches: Map[TopicPartition, Map[StreamId, FetchRequest[F, K, V]]],
     records: Map[TopicPartition, NonEmptyVector[CommittableConsumerRecord[F, K, V]]],
-    pendingCommits: Chain[Request.Commit[F]],
+    pendingCommits: Chain[F[Unit]],
     onRebalances: Chain[OnRebalance[F]],
     rebalancing: Boolean,
     subscribed: Boolean,
@@ -562,7 +552,7 @@ private[kafka] object KafkaConsumerActor {
     def withoutRecords(partitions: Set[TopicPartition]): State[F, K, V] =
       copy(records = records.filterKeysStrict(!partitions.contains(_)))
 
-    def withPendingCommit(pendingCommit: Request.Commit[F]): State[F, K, V] =
+    def withPendingCommit(pendingCommit: F[Unit]): State[F, K, V] =
       copy(pendingCommits = pendingCommits.append(pendingCommit))
 
     def withoutPendingCommits: State[F, K, V] =
