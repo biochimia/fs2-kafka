@@ -84,7 +84,7 @@ object KafkaConsumer {
     * The resulting effect runs forever, until canceled.
     */
   private def runConsumerActor[F[_], K, V](
-    requests: QueueSource[F, Request[F, K, V]],
+    requests: QueueSource[F, Request[F]],
     polls: QueueSource[F, Request.Poll[F]],
     actor: KafkaConsumerActor[F, K, V]
   )(implicit
@@ -99,7 +99,7 @@ object KafkaConsumer {
     *
     * The resulting effect runs forever, until canceled.
     */
-  private def runPollScheduler[F[_], K, V](
+  private def runPollScheduler[F[_]](
     polls: QueueSink[F, Request.Poll[F]],
     pollInterval: FiniteDuration
   )(implicit
@@ -108,7 +108,7 @@ object KafkaConsumer {
     polls.offer(Request.poll).andWait(pollInterval).foreverM[Unit]
 
   private def startBackgroundConsumer[F[_], K, V](
-    requests: QueueSource[F, Request[F, K, V]],
+    requests: QueueSource[F, Request[F]],
     polls: Queue[F, Request.Poll[F]],
     actor: KafkaConsumerActor[F, K, V],
     pollInterval: FiniteDuration
@@ -125,7 +125,9 @@ object KafkaConsumer {
     }(_.cancel.start.void)
 
   private def createKafkaConsumer[F[_], K, V](
-    requests: QueueSink[F, Request[F, K, V]],
+    keyDeserializer: KeyDeserializer[F, K],
+    valueDeserializer: ValueDeserializer[F, V],
+    requests: QueueSink[F, Request[F]],
     actor: KafkaConsumerActor[F, K, V],
     fiber: Fiber[F, Throwable, Unit],
     id: Int,
@@ -155,7 +157,17 @@ object KafkaConsumer {
                     .void
                     .attempt
 
-                Stream.fromQueueUnterminated(chunksQueue, 1).unchunks.interruptWhen(stopStream)
+                Stream
+                  .fromQueueUnterminated(chunksQueue)
+                  .evalMap { chunk =>
+                    chunk.traverse { record =>
+                      ConsumerRecord
+                        .fromJava(record, keyDeserializer, valueDeserializer)
+                        .map(actor.committableConsumerRecord(_, partition))
+                    }
+                  }
+                  .unchunks
+                  .interruptWhen(stopStream)
               }
           }
 
@@ -249,7 +261,7 @@ object KafkaConsumer {
         }
 
       private[this] def request[A](
-        request: (Either[Throwable, A] => F[Unit]) => Request[F, K, V]
+        request: (Either[Throwable, A] => F[Unit]) => Request[F]
       ): F[A] =
         Deferred[F, Either[Throwable, A]]
           .flatMap { deferred =>
@@ -556,9 +568,9 @@ object KafkaConsumer {
       id                    <- Resource.eval(F.delay(new Object().hashCode))
       jitter                <- Resource.eval(Jitter.default[F])
       logging               <- Resource.eval(Logging.default[F](id))
-      requests              <- Resource.eval(Queue.unbounded[F, Request[F, K, V]])
+      requests              <- Resource.eval(Queue.unbounded[F, Request[F]])
       polls                 <- Resource.eval(Queue.bounded[F, Request.Poll[F]](1))
-      ref                   <- Resource.eval(Ref.of[F, State[F, K, V]](State.empty))
+      ref                   <- Resource.eval(Ref.of[F, State[F]](State.empty))
       dispatcher            <- Dispatcher.sequential[F]
       stopConsumingDeferred <- Resource.eval(Deferred[F, Unit])
       withConsumer          <- WithConsumer(mk, settings)
@@ -569,8 +581,6 @@ object KafkaConsumer {
 
         new KafkaConsumerActor(
           settings = settings,
-          keyDeserializer = keyDeserializer,
-          valueDeserializer = valueDeserializer,
           ref = ref,
           requests = requests,
           withConsumer = withConsumer
@@ -578,6 +588,8 @@ object KafkaConsumer {
       }
       fiber <- startBackgroundConsumer(requests, polls, actor, settings.pollInterval)
     } yield createKafkaConsumer(
+      keyDeserializer,
+      valueDeserializer,
       requests,
       actor,
       fiber,
