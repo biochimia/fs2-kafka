@@ -46,10 +46,8 @@ import org.apache.kafka.common.TopicPartition
   */
 final private[kafka] class KafkaConsumerActor[F[_], K, V](
   settings: ConsumerSettings[F, K, V],
-  keyDeserializer: KeyDeserializer[F, K],
-  valueDeserializer: ValueDeserializer[F, V],
-  val ref: Ref[F, State[F, K, V]],
-  requests: Queue[F, Request[F, K, V]],
+  val ref: Ref[F, State[F]],
+  requests: Queue[F, Request[F]],
   withConsumer: WithConsumer[F]
 )(implicit
   F: Async[F],
@@ -58,10 +56,7 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
   jitter: Jitter[F]
 ) {
 
-  private[this] type ConsumerRecords =
-    Map[TopicPartition, Chunk[CommittableConsumerRecord[F, K, V]]]
-
-  private[this] type ConsumerQueue = Queue[F, Chunk[CommittableConsumerRecord[F, K, V]]]
+  private[this] type ConsumerQueue = Queue[F, Chunk[KafkaByteConsumerRecord]]
 
   private[this] val consumerGroupId: Option[String] =
     settings.properties.get(ConsumerConfig.GROUP_ID_CONFIG)
@@ -155,7 +150,7 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
       }
     }
 
-  private[this] def committableConsumerRecord(
+  def committableConsumerRecord(
     record: ConsumerRecord[K, V],
     partition: TopicPartition
   ): CommittableConsumerRecord[F, K, V] =
@@ -171,23 +166,6 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
         commit = offsetCommit
       )
     )
-
-  private[this] def records(batch: KafkaByteConsumerRecords): F[ConsumerRecords] =
-    batch
-      .partitions
-      .toVector
-      .traverse { partition =>
-        batch
-          .records(partition)
-          .toVector
-          .traverse { record =>
-            ConsumerRecord
-              .fromJava(record, keyDeserializer, valueDeserializer)
-              .map(committableConsumerRecord(_, partition))
-          }
-          .map(records => (partition, Chunk.from(records)))
-      }
-      .map(_.toMap)
 
   private[this] val pollTimeout: Duration =
     settings.pollTimeout.toJava
@@ -219,37 +197,40 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
 
     // Polls for records, and deserialize.
     val pollForRecords = { (assignment: Set[TopicPartition], queueIsFull: List[TopicPartition]) =>
-      withConsumer
-        .blocking { consumer =>
-          val resumePartitions = assignment -- queueIsFull
+      withConsumer.blocking { consumer =>
+        val resumePartitions = assignment -- queueIsFull
 
-          if (queueIsFull.nonEmpty)
-            consumer.pause(queueIsFull.asJava)
+        if (queueIsFull.nonEmpty)
+          consumer.pause(queueIsFull.asJava)
 
-          if (resumePartitions.nonEmpty)
-            consumer.resume(resumePartitions.asJava)
+        if (resumePartitions.nonEmpty)
+          consumer.resume(resumePartitions.asJava)
 
-          consumer.poll(pollTimeout)
-        }
-        .flatMap(records)
+        val batch = consumer.poll(pollTimeout)
+
+        batch
+          .partitions
+          .toVector
+          .map(partition => partition -> Chunk.javaList(batch.records(partition)))
+          .toMap
+      }
     }
 
     // Attempts to enqueue existing spillover records and newly fetched records. Returns updated spillover.
-    val queueRecords = {
-      (partitionState: PartitionStateMap[F, K, V], newRecords: ConsumerRecords) =>
-        require(newRecords.forall(kv => partitionState.contains(kv._1)))
+    val queueRecords = { (partitionState: PartitionStateMap[F], newRecords: ConsumerRecords) =>
+      require(newRecords.forall(kv => partitionState.contains(kv._1)))
 
-        partitionState
-          .toList
-          .flatTraverse { case (partition, PartitionState(queue, spillover, _)) =>
-            val chunk = spillover ++ newRecords.getOrElse(partition, Chunk.empty)
+      partitionState
+        .toList
+        .flatTraverse { case (partition, PartitionState(queue, spillover, _)) =>
+          val chunk = spillover ++ newRecords.getOrElse(partition, Chunk.empty)
 
-            F.pure(chunk.isEmpty)
-              .ifM[List[(TopicPartition, Chunk[CommittableConsumerRecord[F, K, V]])]](
-                F.pure(Nil),
-                queue.tryOffer(chunk).ifF(Nil, List(partition -> chunk))
-              )
-          }
+          F.pure(chunk.isEmpty)
+            .ifM[List[(TopicPartition, Chunk[KafkaByteConsumerRecord])]](
+              F.pure(Nil),
+              queue.tryOffer(chunk).ifF(Nil, List(partition -> chunk))
+            )
+        }
     }
 
     // Resets spillover, resets pending commits.
@@ -288,7 +269,7 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
     */
   private[this] def ensurePartitionStateFor(
     partitions: Set[TopicPartition]
-  ): F[PartitionStateMap[F, K, V]] =
+  ): F[PartitionStateMap[F]] =
     ref
       .get
       .flatMap { state =>
@@ -298,10 +279,8 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
             missing
               .traverse { partition =>
                 (
-                  Queue.bounded[F, Chunk[CommittableConsumerRecord[F, K, V]]](
-                    settings.maxPrefetchBatches
-                  ),
-                  F.pure(Chunk.empty[CommittableConsumerRecord[F, K, V]]),
+                  Queue.bounded[F, Chunk[KafkaByteConsumerRecord]](settings.maxPrefetchBatches),
+                  F.pure(Chunk.empty[KafkaByteConsumerRecord]),
                   F.deferred[Unit]
                 ).parMapN(partition -> PartitionState(_, _, _))
               }
@@ -321,7 +300,7 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
       }
     }
 
-  def handle(request: Request[F, K, V]): F[Unit] =
+  def handle(request: Request[F]): F[Unit] =
     request match {
       case Request.Poll()                            => poll
       case request @ Request.Commit(_, _)            => commit(request)
@@ -334,9 +313,11 @@ final private[kafka] class KafkaConsumerActor[F[_], K, V](
 
 private[kafka] object KafkaConsumerActor {
 
-  final case class PartitionState[F[_]: Async, K, V](
-    queue: Queue[F, Chunk[CommittableConsumerRecord[F, K, V]]],
-    spillover: Chunk[CommittableConsumerRecord[F, K, V]],
+  private type ConsumerRecords = Map[TopicPartition, Chunk[KafkaByteConsumerRecord]]
+
+  final case class PartitionState[F[_]: Async](
+    queue: Queue[F, Chunk[KafkaByteConsumerRecord]],
+    spillover: Chunk[KafkaByteConsumerRecord],
     closeSignal: Deferred[F, Unit]
   ) {
 
@@ -352,10 +333,10 @@ private[kafka] object KafkaConsumerActor {
 
   }
 
-  private type PartitionStateMap[F[_], K, V] = Map[TopicPartition, PartitionState[F, K, V]]
+  type PartitionStateMap[F[_]] = Map[TopicPartition, PartitionState[F]]
 
-  final case class State[F[_], K, V](
-    partitionState: PartitionStateMap[F, K, V],
+  final case class State[F[_]](
+    partitionState: PartitionStateMap[F],
     pendingCommits: Chain[F[Unit]],
     onRebalances: Chain[OnRebalance[F]],
     rebalancing: Boolean,
@@ -373,10 +354,10 @@ private[kafka] object KafkaConsumerActor {
       * Use with `Ref.modify`.
       */
     def addPartitionStates(
-      newPartitionState: PartitionStateMap[F, K, V]
-    ): (State[F, K, V], PartitionStateMap[F, K, V]) = {
+      newPartitionState: PartitionStateMap[F]
+    ): (State[F], PartitionStateMap[F]) = {
       // Own partitionState takes precedence over newPartitionState
-      val newState: State[F, K, V] = copy(partitionState = newPartitionState ++ partitionState)
+      val newState: State[F] = copy(partitionState = newPartitionState ++ partitionState)
       (newState, newState.partitionState)
     }
 
@@ -395,8 +376,8 @@ private[kafka] object KafkaConsumerActor {
       */
     def withAssignedPartitions(
       assigned: SortedSet[TopicPartition]
-    )(implicit logging: Logging[F]): (State[F, K, V], F[F[Unit]]) = {
-      val newState: State[F, K, V] = if (!rebalancing) this else copy(rebalancing = false)
+    )(implicit logging: Logging[F]): (State[F], F[F[Unit]]) = {
+      val newState: State[F] = if (!rebalancing) this else copy(rebalancing = false)
 
       (
         newState,
@@ -421,10 +402,10 @@ private[kafka] object KafkaConsumerActor {
       */
     def withRevokedPartitions(
       revoked: SortedSet[TopicPartition]
-    )(implicit logging: Logging[F]): (State[F, K, V], F[F[Unit]]) = {
+    )(implicit logging: Logging[F]): (State[F], F[F[Unit]]) = {
       val (revokedToClose, stillAssigned) = partitionState.partition(e => revoked.contains(e._1))
 
-      val newState: State[F, K, V] = copy(partitionState = stillAssigned, rebalancing = true)
+      val newState: State[F] = copy(partitionState = stillAssigned, rebalancing = true)
 
       (
         newState,
@@ -445,11 +426,11 @@ private[kafka] object KafkaConsumerActor {
       */
     def dropUnassignedPartitions(
       assignment: Set[TopicPartition]
-    )(implicit logging: Logging[F]): (State[F, K, V], F[List[TopicPartition]]) = {
+    )(implicit logging: Logging[F]): (State[F], F[List[TopicPartition]]) = {
       val (assigned, revoked) = partitionState.partition(e => assignment.contains(e._1))
 
-      val newState: State[F, K, V] = copy(partitionState = assigned)
-      val queueIsFull              = assigned.filter(_._2.isQueueFull).keys.toList
+      val newState: State[F] = copy(partitionState = assigned)
+      val queueIsFull        = assigned.filter(_._2.isQueueFull).keys.toList
 
       (
         newState,
@@ -463,15 +444,13 @@ private[kafka] object KafkaConsumerActor {
     /**
       * Resets partition states with a new set of spillover records after a poll operation.
       */
-    def resetSpilloverAfterPoll(
-      spillover: Map[TopicPartition, Chunk[CommittableConsumerRecord[F, K, V]]]
-    ): State[F, K, V] =
+    def resetSpilloverAfterPoll(spillover: ConsumerRecords): State[F] =
       if (spillover.isEmpty)
         this
       else {
         require(spillover.forall(kv => partitionState.contains(kv._1)))
 
-        val newPartitionState: PartitionStateMap[F, K, V] = partitionState.map {
+        val newPartitionState: PartitionStateMap[F] = partitionState.map {
           case (partition, partitionState) =>
             (
               partition,
@@ -497,23 +476,23 @@ private[kafka] object KafkaConsumerActor {
       *
       * Use with `Ref.flatModify`.
       */
-    def resetPendingCommitsAfterPoll: (State[F, K, V], F[Unit]) =
+    def resetPendingCommitsAfterPoll: (State[F], F[Unit]) =
       if (pendingCommits.isEmpty || rebalancing) (this, F.unit)
       else (copy(pendingCommits = Chain.empty), pendingCommits.sequence_)
 
-    def withOnRebalance(onRebalance: OnRebalance[F]): State[F, K, V] =
+    def withOnRebalance(onRebalance: OnRebalance[F]): State[F] =
       copy(onRebalances = onRebalances.append(onRebalance))
 
-    def withPendingCommit(pendingCommit: F[Unit]): State[F, K, V] =
+    def withPendingCommit(pendingCommit: F[Unit]): State[F] =
       copy(pendingCommits = pendingCommits.append(pendingCommit))
 
-    def asSubscribed: State[F, K, V] =
+    def asSubscribed: State[F] =
       if (subscribed) this else copy(subscribed = true)
 
-    def asUnsubscribed: State[F, K, V] =
+    def asUnsubscribed: State[F] =
       if (!subscribed) this else copy(subscribed = false)
 
-    def asStreaming: State[F, K, V] =
+    def asStreaming: State[F] =
       if (streaming) this else copy(streaming = true)
 
     override def toString: String =
@@ -523,7 +502,7 @@ private[kafka] object KafkaConsumerActor {
 
   object State {
 
-    def empty[F[_]: Async, K, V]: State[F, K, V] =
+    def empty[F[_]: Async]: State[F] =
       State(
         partitionState = Map.empty,
         pendingCommits = Chain.empty,
@@ -545,14 +524,14 @@ private[kafka] object KafkaConsumerActor {
 
   }
 
-  sealed abstract class Request[F[_], -K, -V]
+  sealed abstract class Request[F[_]]
 
   object Request {
 
     final case class WithPermit[F[_], A](fa: F[A], callback: Either[Throwable, A] => F[Unit])
-        extends Request[F, Any, Any]
+        extends Request[F]
 
-    final case class Poll[F[_]]() extends Request[F, Any, Any]
+    final case class Poll[F[_]]() extends Request[F]
 
     private[this] val pollInstance: Poll[Nothing] =
       Poll[Nothing]()
@@ -563,17 +542,17 @@ private[kafka] object KafkaConsumerActor {
     final case class Commit[F[_]](
       offsets: Map[TopicPartition, OffsetAndMetadata],
       callback: Either[Throwable, Unit] => Unit
-    ) extends Request[F, Any, Any]
+    ) extends Request[F]
 
     final case class ManualCommitAsync[F[_]](
       offsets: Map[TopicPartition, OffsetAndMetadata],
       callback: Either[Throwable, Unit] => F[Unit]
-    ) extends Request[F, Any, Any]
+    ) extends Request[F]
 
     final case class ManualCommitSync[F[_]](
       offsets: Map[TopicPartition, OffsetAndMetadata],
       callback: Either[Throwable, Unit] => F[Unit]
-    ) extends Request[F, Any, Any]
+    ) extends Request[F]
 
   }
 

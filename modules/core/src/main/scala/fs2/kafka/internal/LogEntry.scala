@@ -16,9 +16,9 @@ import fs2.kafka.instances.*
 import fs2.kafka.internal.syntax.*
 import fs2.kafka.internal.KafkaConsumerActor.*
 import fs2.kafka.internal.LogLevel.*
-import fs2.kafka.CommittableConsumerRecord
 import fs2.Chunk
 
+import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.common.TopicPartition
 
 sealed abstract private[kafka] class LogEntry {
@@ -33,7 +33,7 @@ private[kafka] object LogEntry {
 
   final case class SubscribedTopics[F[_]](
     topics: NonEmptyList[String],
-    state: State[F, ?, ?]
+    state: State[F]
   ) extends LogEntry {
 
     override def level: LogLevel = Debug
@@ -45,7 +45,7 @@ private[kafka] object LogEntry {
 
   final case class ManuallyAssignedPartitions[F[_]](
     partitions: NonEmptySet[TopicPartition],
-    state: State[F, ?, ?]
+    state: State[F]
   ) extends LogEntry {
 
     override def level: LogLevel = Debug
@@ -57,7 +57,7 @@ private[kafka] object LogEntry {
 
   final case class SubscribedPattern[F[_]](
     pattern: Pattern,
-    state: State[F, ?, ?]
+    state: State[F]
   ) extends LogEntry {
 
     override def level: LogLevel = Debug
@@ -68,7 +68,7 @@ private[kafka] object LogEntry {
   }
 
   final case class Unsubscribed[F[_]](
-    state: State[F, ?, ?]
+    state: State[F]
   ) extends LogEntry {
 
     override def level: LogLevel = Debug
@@ -80,7 +80,7 @@ private[kafka] object LogEntry {
 
   final case class StoredOnRebalance[F[_]](
     onRebalance: OnRebalance[F],
-    state: State[F, ?, ?]
+    state: State[F]
   ) extends LogEntry {
 
     override def level: LogLevel = Debug
@@ -92,7 +92,7 @@ private[kafka] object LogEntry {
 
   final case class AssignedPartitions[F[_]](
     partitions: SortedSet[TopicPartition],
-    state: State[F, ?, ?]
+    state: State[F]
   ) extends LogEntry {
 
     override def level: LogLevel = Debug
@@ -102,10 +102,10 @@ private[kafka] object LogEntry {
 
   }
 
-  final case class RevokedPartitions[F[_], K, V](
+  final case class RevokedPartitions[F[_]](
     partitions: Set[TopicPartition],
-    partitionState: Map[TopicPartition, PartitionState[F, K, V]],
-    state: State[F, ?, ?]
+    partitionState: Map[TopicPartition, PartitionState[F]],
+    state: State[F]
   ) extends LogEntry {
 
     override def level: LogLevel = Debug
@@ -131,7 +131,7 @@ private[kafka] object LogEntry {
 
   final case class StoredPendingCommit[F[_]](
     commit: Request.Commit[F],
-    state: State[F, ?, ?]
+    state: State[F]
   ) extends LogEntry {
 
     override def level: LogLevel = Debug
@@ -149,9 +149,7 @@ private[kafka] object LogEntry {
 
   }
 
-  def recordsString[F[_]](
-    records: Map[TopicPartition, Chunk[CommittableConsumerRecord[F, ?, ?]]]
-  ): String =
+  def recordsString(records: Map[TopicPartition, Chunk[ConsumerRecord[?, ?]]]): String =
     records
       .toList
       .sortBy { case (tp, _) => tp }
