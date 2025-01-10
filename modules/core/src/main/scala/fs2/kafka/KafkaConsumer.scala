@@ -560,7 +560,7 @@ object KafkaConsumer {
     settings: ConsumerSettings[F, K, V]
   )(implicit
     F: Async[F],
-    mk: MkConsumer[F]
+    mk: MkConsumer
   ): Resource[F, KafkaConsumer[F, K, V]] =
     for {
       keyDeserializer       <- settings.keyDeserializer
@@ -609,7 +609,7 @@ object KafkaConsumer {
     */
   def stream[F[_], K, V](
     settings: ConsumerSettings[F, K, V]
-  )(implicit F: Async[F], mk: MkConsumer[F]): Stream[F, KafkaConsumer[F, K, V]] =
+  )(implicit F: Async[F], mk: MkConsumer): Stream[F, KafkaConsumer[F, K, V]] =
     Stream.resource(resource(settings)(F, mk))
 
   def apply[F[_]]: ConsumerPartiallyApplied[F] =
@@ -629,7 +629,7 @@ object KafkaConsumer {
       */
     def resource[K, V](settings: ConsumerSettings[F, K, V])(implicit
       F: Async[F],
-      mk: MkConsumer[F]
+      mk: MkConsumer
     ): Resource[F, KafkaConsumer[F, K, V]] =
       KafkaConsumer.resource(settings)(F, mk)
 
@@ -644,7 +644,7 @@ object KafkaConsumer {
       */
     def stream[K, V](settings: ConsumerSettings[F, K, V])(implicit
       F: Async[F],
-      mk: MkConsumer[F]
+      mk: MkConsumer
     ): Stream[F, KafkaConsumer[F, K, V]] =
       KafkaConsumer.stream(settings)(F, mk)
 
@@ -718,11 +718,11 @@ object KafkaConsumer {
    * to be provided at the call site.
    */
   @nowarn("msg=never used")
-  implicit private def mkAmbig1[F[_]]: MkConsumer[F] =
+  implicit private def mkAmbig1[F[_]]: MkConsumer =
     throw new AssertionError("should not be used")
 
   @nowarn("msg=never used")
-  implicit private def mkAmbig2[F[_]]: MkConsumer[F] =
+  implicit private def mkAmbig2[F[_]]: MkConsumer =
     throw new AssertionError("should not be used")
 
 }

@@ -6,7 +6,6 @@
 
 package fs2.kafka.consumer
 
-import cats.effect.Sync
 import fs2.kafka.{ConsumerSettings, KafkaByteConsumer}
 import fs2.kafka.internal.converters.collection.*
 
@@ -21,16 +20,16 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer
   * behaviour can be overridden, e.g. for testing purposes, by placing an alternative implicit
   * instance in lexical scope.
   */
-trait MkConsumer[F[_]] {
-  def apply[G[_]](settings: ConsumerSettings[G, ?, ?]): F[KafkaByteConsumer]
+trait MkConsumer {
+  def apply[G[_]](settings: ConsumerSettings[G, ?, ?]): KafkaByteConsumer
 }
 
 object MkConsumer {
 
-  implicit def mkConsumerForSync[F[_]](implicit F: Sync[F]): MkConsumer[F] =
-    new MkConsumer[F] {
+  implicit def mkConsumer: MkConsumer =
+    new MkConsumer {
 
-      def apply[G[_]](settings: ConsumerSettings[G, ?, ?]): F[KafkaByteConsumer] = F.delay {
+      def apply[G[_]](settings: ConsumerSettings[G, ?, ?]): KafkaByteConsumer = {
         val byteArrayDeserializer = new ByteArrayDeserializer
         new org.apache.kafka.clients.consumer.KafkaConsumer(
           (settings.properties: Map[String, AnyRef]).asJava,

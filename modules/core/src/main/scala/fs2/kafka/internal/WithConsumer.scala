@@ -19,7 +19,7 @@ sealed abstract private[kafka] class WithConsumer[F[_]] {
 private[kafka] object WithConsumer {
 
   def apply[F[_]: Async, K, V](
-    mk: MkConsumer[F],
+    mk: MkConsumer,
     settings: ConsumerSettings[F, K, V]
   ): Resource[F, WithConsumer[F]] = {
     val blocking: Resource[F, Blocking[F]] = settings.customBlockingContext match {
@@ -29,7 +29,7 @@ private[kafka] object WithConsumer {
 
     blocking.flatMap { b =>
       Resource.make {
-        mk(settings).map { consumer =>
+        b(mk(settings)).map { consumer =>
           new WithConsumer[F] {
 
             override def blocking[A](f: KafkaByteConsumer => A): F[A] =
